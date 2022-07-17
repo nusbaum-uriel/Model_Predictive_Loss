@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import platform
 
 class VehicleResponse(nn.Module):
 
@@ -112,7 +112,10 @@ class VehicleResponse(nn.Module):
 
     def control(self, x, y, yaw, v, traj, target_speed):
         cx, cy = traj[:, 1, 1:], traj[:, 0, 1:]
-        cyaw = torch.arctan2(traj[:, 0, 1:] - traj[:, 0, 0:-1], traj[:, 1, 1:] - traj[:, 1, 0:-1])
+        if platform.system() == 'Linux':
+            cyaw = torch.arctan((traj[:, 0, 1:] - traj[:, 0, 0:-1]) / (traj[:, 1, 1:] - traj[:, 1, 0:-1]))
+        else:
+            cyaw = torch.arctan2(traj[:, 0, 1:] - traj[:, 0, 0:-1], traj[:, 1, 1:] - traj[:, 1, 0:-1])
         acc = self.pid_control(target_speed, v)
         steer, self.target_idx = self.stanley_control(x, y, yaw, v, cx, cy, cyaw, self.target_idx)
         return acc, steer, self.target_idx
