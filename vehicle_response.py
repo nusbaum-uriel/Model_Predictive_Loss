@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import platform
-
+import timeit
 
 class VehicleResponse(nn.Module):
     """
@@ -53,42 +53,46 @@ class VehicleResponse(nn.Module):
             forward: returns the vehicle response given reference trajectory(ies)
 
         """
-    def __init__(self, v=0.0, dt=1.0 / 30.0, L=2.9, max_steer=30.0, max_delta_steer=10.0,      # First line- Vehicle init parameters
-                       k=2.5, Kp=1, Ki=0.1, Kd=2.0,                                            # Second line- controller init parameters
-                       batch_size=32, max_simulation_time=9.0, time=0.0, n=30, device='cpu'):  # Third line- training parameters
+    def __init__(self, v0=0.0, dt=1.0 / 30.0, L=2.9, max_steer=30.0, max_delta_steer=10.0,             # First line- Vehicle init parameters
+                       k=2.5, Kp=1, Ki=0.1, Kd=2.0,                                                    # Second line- controller init parameters
+                       max_simulation_time=9.0, initial_time=0.0, n=30, device='cpu'):                 # Third line- training parameters
 
         super().__init__()
         self.device = device
-        self.batch_size = batch_size
         self.pi = 3.14159265359
-        self.target_idx = 0
         self.max_simulation_time = max_simulation_time
-        self.time = time
         self.dt = dt
         self.n = n
+        self.v0 = v0
+        self.initial_time = initial_time
         # self.n = int((self.max_simulation_time - self.time) / self.dt)
+
         # Vehicle init
-        self.max_steer = self.deg_to_rad(max_steer)  # [rad] max steering angle
-        # self.max_steer = max_steer  # [rad] max steering angle
+        self.max_steer = self.deg_to_rad(max_steer)
         self.max_delta_steer = self.deg_to_rad(max_delta_steer)
-        # self.max_delta_steer = max_delta_steer
-        self.x = torch.zeros(batch_size, 1, device=self.device, requires_grad=True)
-        self.y = torch.zeros(batch_size, 1, device=self.device, requires_grad=True)
-        self.yaw = torch.zeros(batch_size, 1, device=self.device, requires_grad=True)
-        self.v = (torch.ones(batch_size, 1, device=self.device, requires_grad=True) * v)
-        self.true_steer = 0
-        self.L = L  # [m] Wheel base of vehicle
+        self.L = L
 
         # Stanley controller init
-        self.k = k  # control gain
-        self.Kp = Kp  # speed proportional gain
+        self.k = k
+        self.Kp = Kp
         self.Kd = Kd
         self.Ki = Ki
-        self.I = 0
         self.Imax = self.deg_to_rad(15.0)
+
+    def reset(self):
+        self.x = torch.zeros(self.batch_size, 1, device=self.device, requires_grad=True)
+        self.y = torch.zeros(self.batch_size, 1, device=self.device, requires_grad=True)
+        self.yaw = torch.zeros(self.batch_size, 1, device=self.device, requires_grad=True)
+        self.v = (torch.ones(self.batch_size, 1, device=self.device, requires_grad=True) * self.v0)
+        self.true_steer = 0
+        self.I = 0
         self.theta_d = 0
         self.theta_e = 0
         self.delta = 0
+        self.time = self.initial_time
+        self.target_idx = 0
+
+        return
 
     def deg_to_rad(self, angle_deg):
         """
@@ -171,8 +175,8 @@ class VehicleResponse(nn.Module):
         # return self.Kp * tracking_error + 1 * self.Kd * tracking_error / self.dt
         return self.Kp * tracking_error
 
-    def stanley_control(self, x, y, yaw, v,                                             # Vehicle state?
-                              cx, cy, cyaw, last_target_idx):                           # Reference state?
+    def stanley_control(self, x, y, yaw, v,                                             # Vehicle state
+                              cx, cy, cyaw, last_target_idx):                           # Reference state
         """
             calculates steering angle command.
 
@@ -193,11 +197,15 @@ class VehicleResponse(nn.Module):
         current_target_idx, error_front_axle = self.calc_target_index(x, y, yaw, cx, cy)
         if last_target_idx >= current_target_idx:
             current_target_idx = last_target_idx
+
         # theta_e corrects the heading error
+
         theta_e = self.normalize_angle(cyaw[:, current_target_idx] - torch.squeeze(yaw))
         # theta_d corrects the cross track error
         # theta_d = torch.arctan2(self.k * error_front_axle, v).squeeze()
+
         # Steering control
+
         # delta = theta_e + theta_d
         k_e = (self.k / (1 + torch.abs(v)))
         self.I = torch.clip(self.I + self.Ki * error_front_axle, -self.Imax, self.Imax)
@@ -226,14 +234,19 @@ class VehicleResponse(nn.Module):
                            error_front_axle (tensor): and front axle distance from y(self.target_idx)
        """
         # Calc front axle position
+
         fx = x + self.L * torch.cos(yaw)
         fy = y + self.L * torch.sin(yaw)
+
         # Search nearest point index
+
         dx = fx - cx
         dy = fy - cy
         # d = torch.hypot(dx, dy)
         # target_idx = torch.argmin(d, dim=1)
+
         # Project RMS error onto front axle vector
+
         front_axle_vec = torch.hstack((-torch.cos(yaw + self.pi / 2), -torch.sin(yaw + self.pi / 2))).float()
         dxdy = torch.transpose(torch.vstack((dx[:, self.target_idx], dy[:, self.target_idx])), 0, 1)
         error_front_axle = torch.sum((dxdy * front_axle_vec), dim=1, keepdim=True)
@@ -281,6 +294,8 @@ class VehicleResponse(nn.Module):
                            yaw (tensor): vehicle response, heading components
                            self.target_idx (tensor): currently unused
        """
+        self.batch_size = trajectories_batch.size(dim=0)
+        self.reset()
         x = self.x
         y = self.y
         v = self.v
@@ -292,11 +307,6 @@ class VehicleResponse(nn.Module):
                                                   self.v,
                                                   trajectories_batch,
                                                   target_speed)
-            # x_update, y_update, v_update, yaw_update = self.update(acc, steer)
-            # x = torch.hstack((x, x_update))
-            # y = torch.hstack((y, y_update))
-            # v = torch.hstack((v, v_update))
-            # yaw = torch.hstack((yaw, yaw_update))
             self.target_idx += 1
             self.time += self.dt
             self.update(acc, steer)
@@ -304,5 +314,28 @@ class VehicleResponse(nn.Module):
             y = torch.hstack((y, self.y))
             v = torch.hstack((v, self.v))
             yaw = torch.hstack((yaw, self.yaw))
-
         return x, y, v, yaw, self.target_idx
+        # return torch.swapaxes(torch.cat((torch.unsqueeze(x, dim=2), (torch.unsqueeze(y, dim=2))), dim=2), 1, 2)
+#
+#
+# if __name__ == "__main__":
+#
+#     x1 = torch.randn(64, 2, 30).to('cuda')
+#     x1_speed = torch.randn(64, 1).to('cuda')
+#     X2 = torch.randn(32, 2, 30).to('cuda')
+#     X2_speed = torch.randn(32, 1).to('cuda')
+#
+#     my_model = VehicleResponse(device='cuda')
+#
+#     criterion = torch.nn.MSELoss()
+#
+#     init_st = timeit.default_timer()
+#     x1_tag = my_model(x1, x1_speed)
+#     # X2_tag = my_model(X2, X2_speed)
+#     # loss = criterion(x1_tag, X2_tag)
+#     loss = criterion(x1_tag[0:32], x1_tag[32:])
+#     init_end = timeit.default_timer()
+#
+#     print(x1_tag.shape)
+#     print(loss)
+#     print(init_end - init_st)
